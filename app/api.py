@@ -1,59 +1,90 @@
 from fastapi import APIRouter, Header, HTTPException
-from pydantic import BaseModel
-import base64, os, time, binascii
+from pydantic import BaseModel, Field
+from typing import Optional
+import base64
+import os
+import time
 
 from core.audio_processing import load_audio
 from core.feature_extraction import extract_features
 from core.predict import predict_voice
 from core.language_detection import detect_language
 
+# ----------------------------
+# CONFIG
+# ----------------------------
+API_KEY = "VOXGUARD_SECURE_KEY_2026"
+TEMP_AUDIO_FILE = "temp_audio.mp3"
+
 router = APIRouter()
 
-API_KEY = os.getenv("VOXGUARD_API_KEY", "VOXGUARD_SECURE_KEY_2026")
-
+# ----------------------------
+# REQUEST MODEL
+# Accepts BOTH camelCase & snake_case
+# ----------------------------
 class AudioRequest(BaseModel):
-    audio_base64: str
+    language: Optional[str] = None
 
-@router.get("/health")
-def health():
-    return {"status": "ok"}
+    # Accepts audioFormat or audio_format
+    audio_format: Optional[str] = Field(None, alias="audioFormat")
 
+    # Accepts audioBase64 or audio_base64
+    audio_base64: str = Field(..., alias="audioBase64")
+
+    class Config:
+        allow_population_by_field_name = True
+
+
+# ----------------------------
+# API ENDPOINT
+# ----------------------------
 @router.post("/detect")
 def detect_voice(
-    req: AudioRequest,
-    x_api_key: str = Header(..., alias="x-api-key")
+    request: AudioRequest,
+    x_api_key: str = Header(...)
 ):
+    # 🔐 API KEY VALIDATION
     if x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API Key")
 
     start_time = time.time()
 
+    # ----------------------------
+    # Decode Base64 → MP3
+    # ----------------------------
     try:
-        audio_bytes = base64.b64decode(req.audio_base64, validate=True)
-    except (binascii.Error, ValueError):
+        audio_bytes = base64.b64decode(request.audio_base64)
+    except Exception:
         raise HTTPException(status_code=400, detail="Invalid Base64 audio")
 
-    temp_path = "temp.mp3"
-    with open(temp_path, "wb") as f:
+    with open(TEMP_AUDIO_FILE, "wb") as f:
         f.write(audio_bytes)
 
-    audio = load_audio(temp_path)
-    features = extract_features(audio, 16000)
-
-    classification, confidence = predict_voice(features)
-    language = detect_language(audio)
-
+    # ----------------------------
+    # Audio Processing
+    # ----------------------------
     try:
-        os.remove(temp_path)
-    except OSError:
-        pass
+        audio = load_audio(TEMP_AUDIO_FILE)
+        features = extract_features(audio, 16000)
+        classification, confidence = predict_voice(features)
+
+        # Detect language from audio
+        detected_language = detect_language(audio)
+
+    finally:
+        if os.path.exists(TEMP_AUDIO_FILE):
+            os.remove(TEMP_AUDIO_FILE)
 
     processing_time = round(time.time() - start_time, 3)
 
+    # ----------------------------
+    # FINAL JSON RESPONSE
+    # ----------------------------
     return {
         "status": "success",
-        "language": language,
+        "language": detected_language,
         "classification": classification,
         "confidence": f"{confidence}%",
         "processing_time": f"{processing_time} seconds"
     }
+
